@@ -21,7 +21,7 @@ from lib.rubric_tester import (
     compute_accuracy
 )
 
-def grade(code, prompt, rubric, api_key='', llm_model='gpt-4', num_responses=1, temperature=0.2, num_passing_grades=2):
+def grade(code, prompt, rubric, api_key='', llm_model='gpt-4', num_responses=1, temperature=0.2, num_passing_grades=2, remove_comments=False):
   llm_model = 'gpt-4'
   num_responses = 1
   temperature = 0.2
@@ -38,5 +38,12 @@ def grade(code, prompt, rubric, api_key='', llm_model='gpt-4', num_responses=1, 
     print("Using set OPENAI_API_KEY")
 
   grade = Grade()
-  grades = grade.grade_student_work(prompt, rubric, code, "student", [], use_cached=False, write_cached=False, num_responses=num_responses, temperature=temperature, llm_model=llm_model)
-  return json.dumps(grades)
+  return grade.grade_student_work(
+      prompt, rubric, code, "student", [],
+      use_cached=False,
+      write_cached=False,
+      num_responses=num_responses,
+      temperature=temperature,
+      llm_model=llm_model,
+      remove_comments=remove_comments
+  )

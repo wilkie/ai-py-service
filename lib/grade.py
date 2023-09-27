@@ -7,6 +7,8 @@ import requests
 from typing import List, Dict, Any
 from lib.config import VALID_GRADES
 
+from io import StringIO
+
 class InvalidResponseError(Exception):
     pass
 
@@ -14,7 +16,7 @@ class Grade:
     def __init__(self):
         pass
 
-    def grade_student_work(self, prompt, rubric, student_code, student_id, examples=[], use_cached=False, write_cached=True, num_responses=0, temperature=0.0, llm_model=""):
+    def grade_student_work(self, prompt, rubric, student_code, student_id, examples=[], use_cached=False, write_cached=True, num_responses=0, temperature=0.0, llm_model="", remove_comments=False):
         if use_cached and os.path.exists(f"cached_responses/{student_id}.json"):
             with open(f"cached_responses/{student_id}.json", 'r') as f:
                 return json.load(f)
@@ -24,6 +26,9 @@ class Grade:
             'Content-Type': 'application/json',
             'Authorization': f"Bearer {os.getenv('OPENAI_API_KEY')}"
         }
+
+        # Sanitize student code
+        student_code = self.sanitize_code(student_code, remove_comments=remove_comments)
 
         messages = self.compute_messages(prompt, rubric, student_code, examples=examples)
         data = {
@@ -65,6 +70,20 @@ class Grade:
 
         return tsv_data
 
+    def sanitize_code(self, student_code, remove_comments=False):
+        # Remove comments
+        if remove_comments:
+            student_code = "\n".join(
+                list(
+                    map(lambda x:
+                        x[0:x.index("//")] if "//" in x else x,
+                        student_code.split('\n')
+                    )
+                )
+            )
+
+        return student_code
+
     def compute_messages(self, prompt, rubric, student_code, examples=[]):
         messages = [
             {'role': 'system', 'content': f"{prompt}\n\nRubric:\n{rubric}"}
@@ -80,8 +99,41 @@ class Grade:
         if not response_text:
             print(f"{student_id} {choice_text} Invalid response: empty response")
             return None
-        tsv_data = self.parse_tsv(response_text.strip())
+        text = response_text.strip()
+
+        # Remove anything up to the first column name
+        if "\nKey Concept" in text:
+            index = text.index("\nKey Concept")
+            text = text[index:].strip()
+
+        # Replace escaped tabs
+        if '\\t' in text:
+            text = text.replace("\\t", "\t")
+
+        # Replace double tabs... ugh
+        text = text.replace("\t\t", "\t")
+
+        # If there is a tab, it is probably TSV
+        if '\t' not in text:
+            if ' | ' in text:
+                # Ok, sometimes it does markdown sequence... which means it does '|'
+                # as a delimiter and has lines with '---' in them
+                lines = text.split('\n')
+                lines = list(filter(lambda x: "---" not in x, lines))
+                text = "\n".join(lines)
+                print("response was markdown and not tsv, delimiting by '|'")
+
+                tsv_data = list(csv.DictReader(StringIO(text), delimiter='|'))
+            else:
+                # Let's assume it is CSV
+                print("response had no tabs so is not tsv, delimiting by ','")
+                tsv_data = list(csv.DictReader(StringIO(text), delimiter=','))
+        else:
+            # Let's assume it is TSV
+            tsv_data = list(csv.DictReader(StringIO(text), delimiter='\t'))
+
         try:
+            self.sanitize_server_response(tsv_data)
             self.validate_server_response(tsv_data, rubric)
             return [row for row in tsv_data]
         except InvalidResponseError as e:
@@ -92,6 +144,27 @@ class Grade:
         rows = tsv_text.split("\n")
         header = rows.pop(0).split("\t")
         return [dict(zip(header, row.split("\t"))) for row in rows]
+
+    def sanitize_server_response(self, tsv_data):
+        if not isinstance(tsv_data, list):
+            return
+
+        # Strip whitespace and quotes from fields
+        for row in tsv_data:
+            for key in list(row.keys()):
+                if isinstance(row[key], str):
+                    row[key] = row[key].strip().strip('"')
+
+                if isinstance(key, str):
+                    if key.strip() != key:
+                        row[key.strip()] = row[key]
+                        del row[key]
+
+        # Remove rows that don't start with reasonable things
+        for row in tsv_data:
+            if "Key Concept" in row:
+                if not row["Key Concept"][0:1].isalnum():
+                    tsv_data.remove(row)
 
     def validate_server_response(self, tsv_data, rubric):
         expected_columns = ["Key Concept", "Observations", "Grade", "Reason"]
@@ -110,7 +183,7 @@ class Grade:
 
         for row in tsv_data:
             if row["Grade"] not in VALID_GRADES:
-                raise InvalidResponseError(f"invalid grade value: {row['Grade']}")
+                raise InvalidResponseError(f"invalid grade value: '{row['Grade']}'")
 
     def get_consensus_response(self, choices, student_id):
         from collections import Counter
